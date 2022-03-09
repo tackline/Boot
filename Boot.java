@@ -68,7 +68,6 @@ class Boot {
         if (isJava(root)) {
            root = root.getParent();
         }
-        System.err.println(root);
         return root.resolve(thisClass.getSimpleName());
     }
     /**
