@@ -179,7 +179,7 @@ class Boot {
         int methodMods = method.getModifiers();
         must(
             Modifier.isStatic(methodMods),
-            41, "Method "+method+" must be public"
+            41, "Method "+method+" must be static"
         );
         method.setAccessible(true); // Because class may be default access.
         method.invoke(null, new Object[] { args });
