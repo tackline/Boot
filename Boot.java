@@ -24,7 +24,8 @@ import java.util.stream.*;
 import javax.tools.*;
 
 /**
- * Launch a Multi-File Source-Code Program.
+ * Launch a Multi-File Source-Code Program
+ *    with code from https://github.com/tackline/Boot/blob/main/Boot.java .
  * For use as a Single-File Source-Code Program.
  * Runs Main.main(String...),
  *   from Java source code,
@@ -33,49 +34,99 @@ import javax.tools.*;
  *   
  * Compiles to .class files, as in-memory compilation is a palaver.
  */
-class Boot {
-    private static final String mainClassName = "Main";
-    private static final String srcDirName = "src";
+public class Boot {
     public static void main(
-       String[] args
+       String... args
     ) throws
         URISyntaxException,
         IOException,
         ClassNotFoundException,
         NoSuchMethodException,
         IllegalAccessException,
-        IllegalArgumentException,
         InvocationTargetException
     {
-        Class<?> thisClass = MethodHandles.lookup().lookupClass();
-        Path sub = getSubDir(thisClass);
-        Path src = sub.resolve(srcDirName);
-        Path classes = sub.resolve("classes");
+        launchFromSource("src", "Main", args);
+    }
+    /**
+     * Runs code from source, located relative to this class.
+     * @throws URISyntaxException if code source (classpath) really weird
+     */
+    public static void launchFromSource(
+       String relativeSrcDir, String mainClass, String... args
+    ) throws
+        URISyntaxException,
+        IOException,
+        ClassNotFoundException,
+        NoSuchMethodException,
+        IllegalAccessException,
+        InvocationTargetException
+    {
+        Class<?> anchorClass = MethodHandles.lookup().lookupClass();
+        launchFromSource(anchorClass, relativeSrcDir, mainClass, args);
+    }
+    public static void launchFromSource(
+       Class<?> anchor, String relativeSrcDir, String mainClass, String... args
+    ) throws
+        URISyntaxException,
+        IOException,
+        ClassNotFoundException,
+        NoSuchMethodException,
+        IllegalAccessException,
+        InvocationTargetException
+    {
+        runMain(classFromSource(anchor, relativeSrcDir, mainClass), args);
+    }
+    public static Class<?> classFromSource(
+        Class<?> anchor, String relativeSrcDir, String className
+    ) throws URISyntaxException, IOException, ClassNotFoundException {
+        ClassLoader loader = classLoaderFromSource(anchor, relativeSrcDir);
+        // Java use to initialise the class before testing for
+        //    the main method (change argument to true).
+        return Class.forName(className, false, loader);
+    }
+    public static ClassLoader classLoaderFromSource(
+        Class<?> anchor, String relativeSrcDir
+    ) throws URISyntaxException, IOException, ClassNotFoundException {
+        Path sub = getSubDir(anchor);
+        Path src = sub.resolve(relativeSrcDir);
+        Path classes = src.resolve("../classes");
         
         compile(src, classes);
         
-        run(thisClass.getClassLoader().getParent(), classes, args);
+        ClassLoader parentLoader = anchor.getClassLoader().getParent();
+        return URLClassLoader.newInstance(
+            new URL[] { classes.toUri().toURL() },
+            parentLoader
+        );
     }
+    /**
+     * Returns the subdirectory everything else is under,
+     *    based on anchor's code source location.
+     * MyClass.java -> MyClass/
+     * myproject/ -> myproject/MyClass/
+     * myjar.jar -> MyClass/
+     * unreadable -> unreadable/MyClass/
+     */
     private static Path getSubDir(
-        Class<?> thisClass
-    ) throws URISyntaxException, MalformedURLException {
-        URL rootUrl = thisClass
+        Class<?> anchor
+    ) throws URISyntaxException {
+        URL rootUrl = anchor
             .getProtectionDomain().getCodeSource().getLocation();
         Path root = toFilePath(rootUrl);
         // You might think the code source would be the directory,
         //   like for a normal .class file,
         //   but no it is the .java file like .jar.
-        if (isJava(root)) {
+        if (Files.isRegularFile(root)) {
            root = root.getParent();
         }
-        return root.resolve(thisClass.getSimpleName());
+        return root.resolve(anchor.getSimpleName());
     }
     /**
      * Convert URL to File, even with UNC paths (not tested).
      */
     private static Path toFilePath(
         URL url
-    ) throws URISyntaxException, MalformedURLException {
+    ) throws URISyntaxException {
         // Based an idea from https://stackoverflow.com/a/18528710/4725
         URI uri = url.toURI();
         String scheme = uri.getScheme();
@@ -86,19 +137,20 @@ class Boot {
         String authority = uri.getAuthority();
         if (authority != null && !authority.isEmpty()) {
             // Hack for UNC Path
-            uri = new URL(
-                "file://" + url.toString().substring("file:".length())
-            ).toURI();
+            try {
+               uri = new URL(
+                   "file://" + url.toString().substring("file:".length())
+               ).toURI();
+            } catch (MalformedURLException e) {
+               // Weird - don't adjust.
+            }
         }
         return Path.of(uri);
     }
-    /**
-     * Compile booted classes.
-     */
-    private static void compile(
+    public static void compile(
         Path src, Path classes
     ) throws IOException {
-        Path[] srcFiles = findSource(src);
+        Path[] srcFiles = listJavaFiles(src);
         JavaCompiler javaCompiler = ToolProvider.getSystemJavaCompiler();
         try (
             StandardJavaFileManager fileManager =
@@ -123,15 +175,17 @@ class Boot {
             must(task.call(), 20, null);
         }
     }
-    /**
-     * Find *.java source files.
-     */
-    private static Path[] findSource(Path src) throws IOException {
+    private static Path[] listJavaFiles(Path src) throws IOException {
+        PathMatcher isJava =
+            src.getFileSystem().getPathMatcher("glob:*.java");
         final Path[] srcFiles;
         try (
             Stream<Path> walkedPaths =
                 Files.walk(src, FileVisitOption.FOLLOW_LINKS)
-                    .filter(path -> isJava(path))
+                    .filter(path ->
+                        Files.isRegularFile(path) &&
+                        isJava.matches(path.getFileName())
+                    )
         ) {
             srcFiles = walkedPaths.toArray(Path[]::new);
         }
@@ -141,36 +195,13 @@ class Boot {
         );
         return srcFiles;
     }
-    /**
-     * Indicates path is a .java file.
-     */
-    private static boolean isJava(Path path) {
-        PathMatcher isJava =
-            path.getFileSystem().getPathMatcher("glob:*.java");
-        return 
-            Files.isRegularFile(path) &&
-            isJava.matches(path.getFileName());
-    }
-    /**
-     * Execute booted classes.
-     */
-    private static void run(
-        ClassLoader parentLoader, Path classes, String[] args
+    private static void runMain(
+        Class<?> main, String... args
     ) throws
-        MalformedURLException,
-        ClassNotFoundException,
         NoSuchMethodException,
         IllegalAccessException,
-        IllegalArgumentException,
         InvocationTargetException
     {
-        ClassLoader loader = URLClassLoader.newInstance(
-            new URL[] { classes.toUri().toURL() },
-            parentLoader
-        );
-        // Java use to initialise the class before testing for
-        //    the main method (change argument to true).
-        Class<?> main = Class.forName(mainClassName, false, loader);
         Method method = main.getMethod("main", String[].class);
         must(
             method.getReturnType() == void.class,
